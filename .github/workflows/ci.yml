@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "0.1.x"
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint with Ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Type check with MyPy
+        run: uv run mypy src/
+
+      - name: Run pytest
+        run: uv run pytest tests/ -v --tb=short
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "0.1.x"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Check dependencies for vulnerabilities
+        run: |
+          uv pip install bandit
+          uv run bandit -r src/ -ll

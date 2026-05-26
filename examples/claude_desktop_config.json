@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "strava-sport-science": {
+      "command": "uvx",
+      "args": ["strava-sport-science-mcp"],
+      "env": {
+        "STRAVA_CLIENT_ID": "your_client_id_here",
+        "STRAVA_CLIENT_SECRET": "your_client_secret_here",
+        "STRAVA_REFRESH_TOKEN": "your_refresh_token_here"
+      }
+    }
+  }
+}
