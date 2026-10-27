@@ -40,6 +40,7 @@ dev = [
 
 [project.scripts]
 strava-sport-science-mcp = "strava_sport_science_mcp.server:main"
+strava-sport-science-setup = "strava_sport_science_mcp.setup_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/strava_sport_science_mcp"]

@@ -39,21 +39,23 @@ Use it with Claude Desktop or any MCP-compatible client to analyze your training
 
 1. **Create a Strava API app:**
    - Go to https://www.strava.com/settings/api
-   - Create a new app, note your **Client ID** and **Client Secret**
+   - Create a new app with **Authorization Callback Domain** set to `localhost`
+   - Note your **Client ID** and **Client Secret**
 
-2. **Authorize to get a Refresh Token:**
-   - Use the authorization URL: `https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri=http://localhost&scope=activity:read_all`
-   - Replace `{CLIENT_ID}` with your app's Client ID
-   - Click authorize, you'll be redirected with a `code` parameter
-   - Exchange the code for tokens:
-     ```bash
-     curl -X POST https://www.strava.com/oauth/token \
-       -d client_id={CLIENT_ID} \
-       -d client_secret={CLIENT_SECRET} \
-       -d code={CODE} \
-       -d grant_type=authorization_code
-     ```
-   - Save the `refresh_token` from the response
+2. **Add them to a `.env` file** (gitignored):
+   ```bash
+   cp .env.example .env   # then fill in STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET
+   ```
+
+3. **Run the setup command:**
+   ```bash
+   uv run strava-sport-science-setup
+   ```
+   It opens Strava's authorization page in your browser, catches the redirect on
+   `http://localhost:8722`, stores the refresh token in `.env`, then calibrates your
+   settings from your activities (see [Configuration](#configuration)).
+   Steps can be run separately: `... setup auth` (add `--manual` to paste the redirect
+   URL instead) and `... setup calibrate --dry-run`.
 
 ### Install
 
@@ -67,12 +69,13 @@ uv pip install strava-sport-science-mcp
 
 ### Configure
 
-Set environment variables (or create a `.env` file):
+The server reads `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` and `STRAVA_REFRESH_TOKEN`
+from the environment. It does not load `.env` by itself; pass it with uv's `--env-file`:
 
 ```bash
-export STRAVA_CLIENT_ID="your_client_id"
-export STRAVA_CLIENT_SECRET="your_client_secret"
-export STRAVA_REFRESH_TOKEN="your_refresh_token"
+claude mcp add strava-sport-science -- \
+  uv --directory /path/to/strava-sport-science-mcp \
+  run --env-file /path/to/strava-sport-science-mcp/.env strava-sport-science-mcp
 ```
 
 ### Use with Claude Desktop
@@ -206,14 +209,23 @@ User settings are stored in `~/.config/strava-sport-science-mcp/settings.json`:
 
 ```json
 {
-  "max_hr": 190,                    // Maximum heart rate (bpm)
-  "resting_hr": 60,                 // Resting heart rate (bpm)
-  "threshold_pace_min_per_km": 5.0, // Threshold pace (min/km)
-  "weight_kg": 70                   // Body weight (kg)
+  "max_hr": 190,
+  "resting_hr": 60,
+  "threshold_pace_min_per_km": 5.0,
+  "weight_kg": 70
 }
 ```
 
 These are used to calibrate TSS, HR zones, and race readiness. If the file doesn't exist, defaults are created on first run.
+
+`strava-sport-science-setup calibrate` estimates them from your Strava data:
+
+| Setting | How it is estimated |
+|---|---|
+| `threshold_pace_min_per_km` | Best 60-minute-equivalent pace (Riegel's formula) over runs of 15+ min from the last year. Training runs make it conservative; set it to a recent all-out 10K–half pace if you know it. |
+| `max_hr` | Highest `max_heartrate` recorded in your activities (a lower bound). Kept unchanged if no activity has heart-rate data. |
+| `weight_kg` | From your Strava profile (requires the `profile:read_all` scope). |
+| `resting_hr` | Not available from Strava; edit manually. |
 
 ## Development
 
