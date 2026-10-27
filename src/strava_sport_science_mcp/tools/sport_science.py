@@ -122,6 +122,38 @@ def _compute_ctl_atl_tsb(
     return results
 
 
+# CTL starts at 0 and only reaches 1 - e^(-n/42) of its true value after n days, so a
+# window-only computation underestimates fitness (~36% low after 42 days). Fetching 3 time
+# constants of extra history brings the residual starting error down to ~5%.
+CTL_WARMUP_DAYS = 3 * 42
+
+
+async def _fetch_training_loads(
+    days: int,
+) -> tuple[list[DailyTrainingLoad], list[dict]]:
+    """Fetch activities and compute daily loads with a CTL warm-up period.
+
+    Loads are computed from `days + CTL_WARMUP_DAYS` of history, then trimmed to the
+    last `days` days (ending today).
+
+    Args:
+        days: Number of days to return loads for.
+
+    Returns:
+        Tuple of (daily loads within the window, all fetched activities incl. warm-up).
+    """
+    client = get_client()
+    config = get_config()
+
+    now = datetime.now(UTC)
+    cutoff_time = int((now - timedelta(days=days + CTL_WARMUP_DAYS)).timestamp())
+    activities = await client.get_all_activities(after=cutoff_time)
+
+    daily_loads = _compute_ctl_atl_tsb(_build_daily_tss_series(activities, config))
+    window_start = now.date() - timedelta(days=days - 1)
+    return [load for load in daily_loads if load.date >= window_start], activities
+
+
 def _determine_training_phase(daily_loads: list[DailyTrainingLoad]) -> TrainingPhase:
     """Determine current training phase based on CTL trajectory.
 
@@ -177,17 +209,9 @@ async def get_training_load(days: int = 42) -> dict:
     Returns:
         TrainingLoadSummary as dict.
     """
-    client = get_client()
-    config = get_config()
+    daily_loads, _ = await _fetch_training_loads(days)
 
-    cutoff_time = int(
-        (datetime.now(UTC) - timedelta(days=days)).timestamp()
-    )
-    activities = await client.get_all_activities(after=cutoff_time)
-
-    daily_series = _build_daily_tss_series(activities, config)
-
-    if not daily_series:
+    if not daily_loads:
         # No activities, return empty summary
         summary = TrainingLoadSummary(
             daily_loads=[],
@@ -199,7 +223,6 @@ async def get_training_load(days: int = 42) -> dict:
         )
         return summary.model_dump()
 
-    daily_loads = _compute_ctl_atl_tsb(daily_series)
     current_ctl = daily_loads[-1].ctl
     current_atl = daily_loads[-1].atl
     current_tsb = daily_loads[-1].tsb
@@ -546,17 +569,8 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
     Returns:
         RaceReadiness as dict.
     """
-    client = get_client()
-    config = get_config()
-
-    # Get training load data (last 42 days)
-    cutoff_time = int(
-        (datetime.now(UTC) - timedelta(days=42)).timestamp()
-    )
-    activities = await client.get_all_activities(after=cutoff_time)
-
-    daily_series = _build_daily_tss_series(activities, config)
-    daily_loads = _compute_ctl_atl_tsb(daily_series)
+    # Long-run and consistency checks below filter activities to their own 21/28-day windows
+    daily_loads, activities = await _fetch_training_loads(days=42)
 
     current_ctl = daily_loads[-1].ctl if daily_loads else 0
     current_tsb = daily_loads[-1].tsb if daily_loads else 0

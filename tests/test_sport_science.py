@@ -1,7 +1,8 @@
 """Unit tests for sport-science computations."""
 
-
 from datetime import UTC
+
+import pytest
 
 from strava_sport_science_mcp.config import UserConfig
 from strava_sport_science_mcp.tools.sport_science import (
@@ -257,3 +258,59 @@ def test_tsb_equals_ctl_minus_atl() -> None:
             f"TSB mismatch on {load.date}: "
             f"TSB={load.tsb}, CTL-ATL={expected_tsb}"
         )
+
+
+class _FakeClient:
+    """Serves one 1h threshold run per day for the past year, honoring `after`."""
+
+    def __init__(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        self.requested_after: int | None = None
+        self.activities = [
+            {
+                "sport_type": "Run",
+                "average_speed": 1000 / (5.0 * 60),
+                "moving_time": 3600,
+                "start_date": (now - timedelta(days=i)).isoformat(),
+            }
+            for i in range(1, 366)
+        ]
+
+    async def get_all_activities(self, after: int | None = None) -> list[dict]:
+        from datetime import datetime
+
+        self.requested_after = after
+        return [
+            a for a in self.activities
+            if after is None or datetime.fromisoformat(a["start_date"]).timestamp() > after
+        ]
+
+
+async def test_training_loads_use_ctl_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that CTL is warmed up with extra history and the result is trimmed to the window."""
+    from datetime import UTC, datetime, timedelta
+
+    import strava_sport_science_mcp.dependencies as deps
+    from strava_sport_science_mcp.tools.sport_science import (
+        CTL_WARMUP_DAYS,
+        _fetch_training_loads,
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(deps, "client", fake_client)
+    monkeypatch.setattr(deps, "config", UserConfig(threshold_pace_min_per_km=5.0))
+
+    daily_loads, _ = await _fetch_training_loads(days=42)
+
+    # Fetched window + warm-up, returned only the window ending today
+    assert fake_client.requested_after is not None
+    fetched_days = (datetime.now(UTC).timestamp() - fake_client.requested_after) / 86400
+    assert abs(fetched_days - (42 + CTL_WARMUP_DAYS)) < 0.01
+    assert len(daily_loads) == 42
+    assert daily_loads[-1].date == datetime.now(UTC).date()
+    assert daily_loads[0].date == datetime.now(UTC).date() - timedelta(days=41)
+
+    # A year of steady 100 TSS/day: CTL should be near 100, not the ~64 a cold start gives
+    assert daily_loads[-1].ctl > 90, f"CTL not warmed up: {daily_loads[-1].ctl:.1f}"

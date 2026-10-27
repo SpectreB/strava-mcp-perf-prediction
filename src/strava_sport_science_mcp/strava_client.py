@@ -119,16 +119,19 @@ class StravaClient:
         all_activities: list[dict] = []
         page = 1
         max_pages = 10
+        per_page = 200  # Strava's maximum; minimizes requests against the rate limit
 
         while page <= max_pages:
-            activities = await self.get_activities(after=after, before=before, page=page)
+            activities = await self.get_activities(
+                after=after, before=before, per_page=per_page, page=page
+            )
 
             if not activities:
                 break
 
             all_activities.extend(activities)
 
-            if len(activities) < 100:
+            if len(activities) < per_page:
                 break
 
             page += 1
