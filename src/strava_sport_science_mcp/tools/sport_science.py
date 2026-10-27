@@ -1,20 +1,22 @@
 """Sport-science tools for training analysis."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
-from strava_sport_science_mcp.dependencies import client, config
+from strava_sport_science_mcp.config import UserConfig
+from strava_sport_science_mcp.dependencies import get_client, get_config
 from strava_sport_science_mcp.models.metrics import (
     DailyTrainingLoad,
     FitnessTrendSummary,
     RaceReadiness,
     TrainingLoadSummary,
+    TrainingPhase,
     WeeklyTrainingMetrics,
     ZoneBucket,
     ZoneDistribution,
 )
 
 
-def _calculate_tss(activity: dict, config_obj: object) -> float:
+def _calculate_tss(activity: dict, config_obj: UserConfig) -> float:
     """Calculate Training Stress Score for an activity.
 
     Uses a simplified rTSS formula for running, falls back to hrTSS for other sports.
@@ -26,38 +28,38 @@ def _calculate_tss(activity: dict, config_obj: object) -> float:
     Returns:
         TSS value (typically 0-500+).
     """
-    moving_time_hours = activity["moving_time"] / 3600
+    moving_time_hours = float(activity["moving_time"]) / 3600
     sport_type = activity.get("sport_type", "").lower()
 
     # For running activities, use pace-based rTSS
     if "run" in sport_type:
-        avg_speed_ms = activity["average_speed"]
+        avg_speed_ms = float(activity["average_speed"])
 
         # Threshold pace in m/s
         threshold_pace_min_per_km = config_obj.threshold_pace_min_per_km
-        threshold_pace_ms = 1000 / (threshold_pace_min_per_km * 60)
+        threshold_speed_ms = 1000 / (threshold_pace_min_per_km * 60)
 
-        # Intensity factor
-        intensity_factor = threshold_pace_ms / avg_speed_ms if avg_speed_ms > 0 else 0
+        # Intensity factor: threshold pace / activity pace, i.e. activity speed / threshold speed
+        intensity_factor = avg_speed_ms / threshold_speed_ms
 
         # rTSS = (hours) * IF^2 * 100
-        rTSS = moving_time_hours * (intensity_factor ** 2) * 100
-        return rTSS
+        r_tss = moving_time_hours * (intensity_factor ** 2) * 100
+        return r_tss
 
     # For other sports with HR data, use hrTSS
     if activity.get("average_heartrate") is not None:
-        avg_hr = activity["average_heartrate"]
+        avg_hr = float(activity["average_heartrate"])
         max_hr = config_obj.max_hr
 
-        hrTSS = moving_time_hours * ((avg_hr / max_hr) ** 2) * 100
-        return hrTSS
+        hr_tss = moving_time_hours * ((avg_hr / max_hr) ** 2) * 100
+        return hr_tss
 
     # Fallback: estimate based on duration alone (moderate intensity)
     return moving_time_hours * 50
 
 
 def _build_daily_tss_series(
-    activities: list[dict], config_obj: object
+    activities: list[dict], config_obj: UserConfig
 ) -> list[tuple[date, float]]:
     """Build a daily TSS series from activities.
 
@@ -66,7 +68,9 @@ def _build_daily_tss_series(
         config_obj: UserConfig instance.
 
     Returns:
-        List of (date, daily_tss) tuples in chronological order.
+        List of (date, daily_tss) tuples in chronological order, one per calendar day
+        from the first activity through today (UTC). Rest days have 0 TSS so that
+        CTL/ATL decay correctly.
     """
     daily_tss: dict[date, float] = {}
 
@@ -80,8 +84,15 @@ def _build_daily_tss_series(
             daily_tss[activity_date] = 0
         daily_tss[activity_date] += tss
 
-    # Return sorted by date
-    return sorted(daily_tss.items())
+    if not daily_tss:
+        return []
+
+    first_day = min(daily_tss)
+    last_day = max(max(daily_tss), datetime.now(UTC).date())
+    return [
+        (day, daily_tss.get(day, 0.0))
+        for day in (first_day + timedelta(days=i) for i in range((last_day - first_day).days + 1))
+    ]
 
 
 def _compute_ctl_atl_tsb(
@@ -111,7 +122,7 @@ def _compute_ctl_atl_tsb(
     return results
 
 
-def _determine_training_phase(daily_loads: list[DailyTrainingLoad]) -> str:
+def _determine_training_phase(daily_loads: list[DailyTrainingLoad]) -> TrainingPhase:
     """Determine current training phase based on CTL trajectory.
 
     Args:
@@ -166,11 +177,11 @@ async def get_training_load(days: int = 42) -> dict:
     Returns:
         TrainingLoadSummary as dict.
     """
-    if client is None or config is None:
-        raise RuntimeError("Dependencies not initialized")
+    client = get_client()
+    config = get_config()
 
     cutoff_time = int(
-        (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+        (datetime.now(UTC) - timedelta(days=days)).timestamp()
     )
     activities = await client.get_all_activities(after=cutoff_time)
 
@@ -204,7 +215,7 @@ async def get_training_load(days: int = 42) -> dict:
     elif phase == "maintaining":
         interpretation = (
             f"Your fitness is stable at {current_ctl:.1f} with ATL at {current_atl:.1f}. "
-            "You're in a maintaining phase. Form (TSB) is at {current_tsb:.1f}."
+            f"You're in a maintaining phase. Form (TSB) is at {current_tsb:.1f}."
         )
     elif phase == "overreaching":
         interpretation = (
@@ -253,11 +264,11 @@ async def get_zone_distribution(days: int = 30) -> dict:
     Returns:
         ZoneDistribution as dict.
     """
-    if client is None or config is None:
-        raise RuntimeError("Dependencies not initialized")
+    client = get_client()
+    config = get_config()
 
     cutoff_time = int(
-        (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+        (datetime.now(UTC) - timedelta(days=days)).timestamp()
     )
     activities = await client.get_all_activities(after=cutoff_time)
 
@@ -396,11 +407,11 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
     Returns:
         FitnessTrendSummary as dict.
     """
-    if client is None or config is None:
-        raise RuntimeError("Dependencies not initialized")
+    client = get_client()
+    config = get_config()
 
     cutoff_time = int(
-        (datetime.now(timezone.utc) - timedelta(weeks=weeks)).timestamp()
+        (datetime.now(UTC) - timedelta(weeks=weeks)).timestamp()
     )
     activities = await client.get_all_activities(after=cutoff_time)
 
@@ -535,12 +546,12 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
     Returns:
         RaceReadiness as dict.
     """
-    if client is None or config is None:
-        raise RuntimeError("Dependencies not initialized")
+    client = get_client()
+    config = get_config()
 
     # Get training load data (last 42 days)
     cutoff_time = int(
-        (datetime.now(timezone.utc) - timedelta(days=42)).timestamp()
+        (datetime.now(UTC) - timedelta(days=42)).timestamp()
     )
     activities = await client.get_all_activities(after=cutoff_time)
 
@@ -548,7 +559,6 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
     daily_loads = _compute_ctl_atl_tsb(daily_series)
 
     current_ctl = daily_loads[-1].ctl if daily_loads else 0
-    current_atl = daily_loads[-1].atl if daily_loads else 0
     current_tsb = daily_loads[-1].tsb if daily_loads else 0
 
     # Score 1: Fitness
@@ -561,6 +571,7 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
 
     # Find the closest benchmarks
     distances = sorted(target_ctl_benchmarks.keys())
+    target_ctl: float
     if target_distance_km <= distances[0]:
         target_ctl = target_ctl_benchmarks[distances[0]]
     elif target_distance_km >= distances[-1]:
@@ -595,7 +606,7 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
 
     # Score 3: Long run
     long_run_cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=21)
+        datetime.now(UTC) - timedelta(days=21)
     ).timestamp()
     recent_activities = [
         a for a in activities
@@ -623,7 +634,7 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
 
     # Score 4: Consistency
     recent_28_days = (
-        datetime.now(timezone.utc) - timedelta(days=28)
+        datetime.now(UTC) - timedelta(days=28)
     ).timestamp()
     recent_all = [
         a for a in activities

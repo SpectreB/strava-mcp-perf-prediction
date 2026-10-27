@@ -7,7 +7,7 @@ from strava_sport_science_mcp.tools import raw, sport_science
 
 mcp = FastMCP(
     "strava-sport-science",
-    description=(
+    instructions=(
         "Sports-science-aware Strava MCP server. Provides training load analysis "
         "(CTL/ATL/TSB), heart rate zone distribution, fitness trends, and race readiness "
         "scoring on top of raw Strava data."

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Activity(BaseModel):
@@ -25,10 +25,8 @@ class Activity(BaseModel):
     start_date: datetime = Field(..., description="Activity start time")
     suffer_score: int | None = Field(None, description="Strava's suffer score (0-100)")
 
-    class Config:
-        """Pydantic config."""
-
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": 12345,
                 "name": "Morning Run",
@@ -44,6 +42,7 @@ class Activity(BaseModel):
                 "suffer_score": 42,
             }
         }
+    )
 
 
 class ActivityStream(BaseModel):
@@ -56,10 +55,8 @@ class ActivityStream(BaseModel):
     cadence: list[float] | None = Field(None, description="Cadence in steps/min (running) or rpm")
     distance: list[float] | None = Field(None, description="Distance in meters")
 
-    class Config:
-        """Pydantic config."""
-
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "time": [0, 1, 2, 3],
                 "heartrate": [120.0, 125.0, 130.0, 135.0],
@@ -69,3 +66,4 @@ class ActivityStream(BaseModel):
                 "distance": [0, 3, 6, 9],
             }
         }
+    )

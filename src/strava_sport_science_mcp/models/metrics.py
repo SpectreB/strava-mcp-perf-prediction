@@ -1,15 +1,17 @@
 """Pydantic models for computed training metrics."""
 
-from datetime import date
+import datetime as dt
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+TrainingPhase = Literal["building", "maintaining", "detraining", "overreaching", "tapering"]
 
 
 class DailyTrainingLoad(BaseModel):
     """Daily training load metrics."""
 
-    date: date = Field(..., description="Date")
+    date: dt.date = Field(..., description="Date")
     tss: float = Field(..., description="Training Stress Score (0-500+ typical)")
     ctl: float = Field(..., description="Chronic Training Load (fitness)")
     atl: float = Field(..., description="Acute Training Load (fatigue)")
@@ -23,9 +25,7 @@ class TrainingLoadSummary(BaseModel):
     current_ctl: float = Field(..., description="Current CTL (fitness)")
     current_atl: float = Field(..., description="Current ATL (fatigue)")
     current_tsb: float = Field(..., description="Current TSB (freshness)")
-    phase: Literal[
-        "building", "maintaining", "detraining", "overreaching", "tapering"
-    ] = Field(..., description="Current training phase")
+    phase: TrainingPhase = Field(..., description="Current training phase")
     interpretation: str = Field(..., description="Plain-text interpretation of current state")
 
 
@@ -52,8 +52,8 @@ class ZoneDistribution(BaseModel):
 class WeeklyTrainingMetrics(BaseModel):
     """Weekly training summary."""
 
-    week_start: date = Field(..., description="Start of ISO week")
-    week_end: date = Field(..., description="End of ISO week")
+    week_start: dt.date = Field(..., description="Start of ISO week")
+    week_end: dt.date = Field(..., description="End of ISO week")
     total_distance_km: float = Field(..., description="Total distance (km)")
     total_duration_hours: float = Field(..., description="Total moving time (hours)")
     total_tss: float = Field(..., description="Total TSS for week")

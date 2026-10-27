@@ -7,8 +7,8 @@ from strava_sport_science_mcp.models.metrics import (
     RaceReadiness,
     TrainingLoadSummary,
     WeeklyTrainingMetrics,
-    ZoneDistribution,
     ZoneBucket,
+    ZoneDistribution,
 )
 
 __all__ = [

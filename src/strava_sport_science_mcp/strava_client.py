@@ -1,9 +1,10 @@
 """Async Strava API v3 client."""
 
+from typing import Any, cast
+
 import httpx
 
 from strava_sport_science_mcp.auth import StravaAuth
-from strava_sport_science_mcp.models.activity import Activity, ActivityStream
 
 
 class StravaClient:
@@ -21,7 +22,7 @@ class StravaClient:
         """
         self.auth = auth
 
-    async def _get(self, endpoint: str, params: dict | None = None) -> dict:
+    async def _get(self, endpoint: str, params: dict | None = None) -> Any:
         """Make an authenticated GET request.
 
         Args:
@@ -29,7 +30,7 @@ class StravaClient:
             params: Query parameters.
 
         Returns:
-            Response JSON as dict.
+            Decoded response JSON (object or array, depending on the endpoint).
 
         Raises:
             RuntimeError: For API errors.
@@ -72,7 +73,7 @@ class StravaClient:
         Returns:
             Athlete profile dict.
         """
-        return await self._get("/athlete")
+        return cast(dict, await self._get("/athlete"))
 
     async def get_activities(
         self,
@@ -101,7 +102,7 @@ class StravaClient:
         if before is not None:
             params["before"] = before
 
-        return await self._get("/athlete/activities", params=params)
+        return cast(list[dict], await self._get("/athlete/activities", params=params))
 
     async def get_all_activities(
         self, after: int | None = None, before: int | None = None
@@ -143,7 +144,7 @@ class StravaClient:
         Returns:
             Activity detail dict.
         """
-        return await self._get(f"/activities/{activity_id}")
+        return cast(dict, await self._get(f"/activities/{activity_id}"))
 
     async def get_activity_streams(
         self, activity_id: int, keys: list[str]
@@ -163,4 +164,4 @@ class StravaClient:
             "key_by_type": "true",
         }
 
-        return await self._get(f"/activities/{activity_id}/streams", params=params)
+        return cast(dict, await self._get(f"/activities/{activity_id}/streams", params=params))

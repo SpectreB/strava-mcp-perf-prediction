@@ -1,6 +1,7 @@
 """Unit tests for sport-science computations."""
 
-import pytest
+
+from datetime import UTC
 
 from strava_sport_science_mcp.config import UserConfig
 from strava_sport_science_mcp.tools.sport_science import (
@@ -118,9 +119,9 @@ def test_ctl_atl_convergence() -> None:
     }
 
     activities = []
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base_date = datetime.now(timezone.utc) - timedelta(days=42)
+    base_date = datetime.now(UTC) - timedelta(days=42)
     for i in range(42):
         activity = activity_template.copy()
         activity_date = base_date + timedelta(days=i)
@@ -130,9 +131,32 @@ def test_ctl_atl_convergence() -> None:
     daily_series = _build_daily_tss_series(activities, config)
     daily_loads = _compute_ctl_atl_tsb(daily_series)
 
-    # After 42 days of consistent 100 TSS, CTL should be close to 100
-    final_ctl = daily_loads[-1].ctl
-    assert 90 < final_ctl < 110, f"Expected CTL ~100, got {final_ctl}"
+    # Starting from 0, a 42-day EMA reaches 1 - (41/42)^42 (~63%) of a constant load
+    # after 42 days. Index 41 is the last training day (the series then runs to today).
+    expected_ctl = 100 * (1 - (41 / 42) ** 42)
+    ctl_after_42_days = daily_loads[41].ctl
+    assert abs(ctl_after_42_days - expected_ctl) < 0.5, (
+        f"Expected CTL ~{expected_ctl:.1f}, got {ctl_after_42_days}"
+    )
+
+
+def test_rest_days_included_in_series() -> None:
+    """Test that days without activities appear with 0 TSS so CTL/ATL decay."""
+    config = UserConfig()
+    from datetime import datetime, timedelta
+
+    today = datetime.now(UTC)
+    activities = [
+        {"sport_type": "Run", "average_speed": 3.0, "moving_time": 3600,
+         "start_date": (today - timedelta(days=5)).isoformat()},
+        {"sport_type": "Run", "average_speed": 3.0, "moving_time": 3600,
+         "start_date": (today - timedelta(days=2)).isoformat()},
+    ]
+
+    daily_series = _build_daily_tss_series(activities, config)
+
+    assert len(daily_series) == 6, "Expected one entry per day from first activity to today"
+    assert [tss > 0 for _, tss in daily_series] == [True, False, False, True, False, False]
 
 
 def test_ctl_slower_growth_than_atl() -> None:
@@ -153,9 +177,9 @@ def test_ctl_slower_growth_than_atl() -> None:
     }
 
     activities = []
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base_date = datetime.now(timezone.utc) - timedelta(days=21)
+    base_date = datetime.now(UTC) - timedelta(days=21)
 
     # First 7 days: 100 TSS per day
     for i in range(7):
@@ -215,9 +239,9 @@ def test_tsb_equals_ctl_minus_atl() -> None:
     }
 
     activities = []
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base_date = datetime.now(timezone.utc) - timedelta(days=30)
+    base_date = datetime.now(UTC) - timedelta(days=30)
     for i in range(30):
         activity = activity_template.copy()
         activity_date = base_date + timedelta(days=i)

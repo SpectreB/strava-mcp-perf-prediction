@@ -1,9 +1,8 @@
 """Raw Strava API tools that expose basic activity data."""
 
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from strava_sport_science_mcp.dependencies import client
+from strava_sport_science_mcp.dependencies import get_client
 
 
 async def get_activities(days_back: int = 30) -> list[dict]:
@@ -20,8 +19,8 @@ async def get_activities(days_back: int = 30) -> list[dict]:
     Returns:
         List of activity dicts.
     """
-    cutoff_time = int((datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp())
-    activities = await client.get_all_activities(after=cutoff_time)
+    cutoff_time = int((datetime.now(UTC) - timedelta(days=days_back)).timestamp())
+    activities = await get_client().get_all_activities(after=cutoff_time)
 
     return activities
 
@@ -38,7 +37,7 @@ async def get_activity_detail(activity_id: int) -> dict:
     Returns:
         Detailed activity dict.
     """
-    return await client.get_activity(activity_id)
+    return await get_client().get_activity(activity_id)
 
 
 async def get_athlete_profile() -> dict:
@@ -50,7 +49,7 @@ async def get_athlete_profile() -> dict:
     Returns:
         Athlete profile dict.
     """
-    return await client.get_athlete()
+    return await get_client().get_athlete()
 
 
 async def get_activity_streams(
@@ -72,4 +71,4 @@ async def get_activity_streams(
         Dict of stream data keyed by type.
     """
     keys = [k.strip() for k in stream_types.split(",")]
-    return await client.get_activity_streams(activity_id, keys)
+    return await get_client().get_activity_streams(activity_id, keys)

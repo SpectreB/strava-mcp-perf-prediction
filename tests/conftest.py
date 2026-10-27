@@ -1,12 +1,11 @@
 """Shared test fixtures."""
 
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from strava_sport_science_mcp.config import UserConfig
-from strava_sport_science_mcp.models.activity import Activity
 
 
 @pytest.fixture
@@ -37,7 +36,7 @@ def mock_activities() -> list[dict]:
     random.seed(42)  # Deterministic for reproducibility
 
     activities: list[dict] = []
-    base_time = datetime.now(timezone.utc) - timedelta(days=60)
+    base_time = datetime.now(UTC) - timedelta(days=60)
     activity_id = 1
 
     # Generate 60 days of activities
