@@ -67,6 +67,7 @@ class StravaAuth:
                 },
                 f,
             )
+        self._tokens_path.chmod(0o600)  # contains credentials
 
     async def _refresh_access_token(self) -> None:
         """Refresh the access token using the refresh token.
