@@ -223,7 +223,7 @@ These are used to calibrate TSS, HR zones, and race readiness. If the file doesn
 git clone https://github.com/yourusername/strava-sport-science-mcp.git
 cd strava-sport-science-mcp
 
-uv sync --dev
+uv sync --extra dev
 ```
 
 ### Run Tests
