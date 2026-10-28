@@ -5,9 +5,9 @@ from datetime import UTC
 import pytest
 
 from strava_sport_science_mcp.config import UserConfig
+from strava_sport_science_mcp.tools.intensity import calculate_tss
 from strava_sport_science_mcp.tools.sport_science import (
     _build_daily_tss_series,
-    _calculate_tss,
     _compute_ctl_atl_tsb,
 )
 
@@ -30,7 +30,7 @@ def test_tss_one_hour_at_threshold() -> None:
         "average_heartrate": 165,
     }
 
-    tss = _calculate_tss(activity, config)
+    tss, method = calculate_tss(activity, config)
     assert abs(tss - 100) < 1, f"Expected ~100 TSS, got {tss}"
 
 
@@ -51,7 +51,7 @@ def test_tss_thirty_minutes_at_threshold() -> None:
         "average_heartrate": 165,
     }
 
-    tss = _calculate_tss(activity, config)
+    tss, method = calculate_tss(activity, config)
     assert abs(tss - 50) < 1, f"Expected ~50 TSS, got {tss}"
 
 
@@ -74,7 +74,7 @@ def test_tss_slower_than_threshold() -> None:
         "average_heartrate": 145,
     }
 
-    tss = _calculate_tss(activity, config)
+    tss, method = calculate_tss(activity, config)
     assert tss < 100, f"Expected TSS < 100, got {tss}"
 
 
@@ -97,7 +97,7 @@ def test_tss_faster_than_threshold() -> None:
         "average_heartrate": 175,
     }
 
-    tss = _calculate_tss(activity, config)
+    tss, method = calculate_tss(activity, config)
     assert tss > 100, f"Expected TSS > 100, got {tss}"
 
 
@@ -278,13 +278,16 @@ class _FakeClient:
             for i in range(1, 366)
         ]
 
-    async def get_all_activities(self, after: int | None = None) -> list[dict]:
+    async def get_all_activities(
+        self, after: int | None = None, before: int | None = None
+    ) -> list[dict]:
         from datetime import datetime
 
         self.requested_after = after
         return [
             a for a in self.activities
-            if after is None or datetime.fromisoformat(a["start_date"]).timestamp() > after
+            if (after is None or datetime.fromisoformat(a["start_date"]).timestamp() > after)
+            and (before is None or datetime.fromisoformat(a["start_date"]).timestamp() < before)
         ]
 
 
@@ -302,12 +305,14 @@ async def test_training_loads_use_ctl_warmup(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(deps, "client", fake_client)
     monkeypatch.setattr(deps, "config", UserConfig(threshold_pace_min_per_km=5.0))
 
-    daily_loads, _ = await _fetch_training_loads(days=42)
+    daily_loads = (await _fetch_training_loads(days=42)).loads
 
-    # Fetched window + warm-up, returned only the window ending today
-    assert fake_client.requested_after is not None
-    fetched_days = (datetime.now(UTC).timestamp() - fake_client.requested_after) / 86400
-    assert abs(fetched_days - (42 + CTL_WARMUP_DAYS)) < 0.01
+    # Fetched window + warm-up (from midnight UTC), returned only the window ending today
+    today = datetime.now(UTC).date()
+    warmup_start = datetime.combine(
+        today - timedelta(days=41 + CTL_WARMUP_DAYS), datetime.min.time(), tzinfo=UTC
+    )
+    assert fake_client.requested_after == int(warmup_start.timestamp())
     assert len(daily_loads) == 42
     assert daily_loads[-1].date == datetime.now(UTC).date()
     assert daily_loads[0].date == datetime.now(UTC).date() - timedelta(days=41)

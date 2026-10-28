@@ -75,6 +75,14 @@ class StravaClient:
         """
         return cast(dict, await self._get("/athlete"))
 
+    async def get_athlete_zones(self) -> dict:
+        """Get the athlete's heart rate and power zones (requires profile:read_all).
+
+        Returns:
+            Zones dict, e.g. {"heart_rate": {"custom_zones": bool, "zones": [{min, max}]}}.
+        """
+        return cast(dict, await self._get("/athlete/zones"))
+
     async def get_activities(
         self,
         after: int | None = None,

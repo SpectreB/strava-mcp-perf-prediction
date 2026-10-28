@@ -1,7 +1,10 @@
 """Sport-science tools for training analysis."""
 
-from datetime import UTC, date, datetime, timedelta
+from collections import Counter
+from datetime import UTC, date, datetime, time, timedelta
+from typing import NamedTuple
 
+from strava_sport_science_mcp import stream_cache
 from strava_sport_science_mcp.config import UserConfig
 from strava_sport_science_mcp.dependencies import get_client, get_config
 from strava_sport_science_mcp.models.metrics import (
@@ -14,71 +17,74 @@ from strava_sport_science_mcp.models.metrics import (
     ZoneBucket,
     ZoneDistribution,
 )
+from strava_sport_science_mcp.strava_client import StravaClient
+from strava_sport_science_mcp.tools.intensity import (
+    STREAM_KEYS,
+    ZONE_NAMES,
+    activity_zone_times,
+    calculate_tss,
+    format_pace,
+    normalize_streams,
+    wants_streams,
+)
 
 
-def _calculate_tss(activity: dict, config_obj: UserConfig) -> float:
-    """Calculate Training Stress Score for an activity.
+def _activity_date(activity: dict) -> date:
+    return datetime.fromisoformat(str(activity["start_date"]).replace("Z", "+00:00")).date()
 
-    Uses a simplified rTSS formula for running, falls back to hrTSS for other sports.
+
+def _day_start_ts(day: date) -> int:
+    """UNIX timestamp of 00:00 UTC on `day`."""
+    return int(datetime.combine(day, time.min, tzinfo=UTC).timestamp())
+
+
+def _resolve_period_end(end_date: str | None) -> tuple[date, int]:
+    """Last day of the analysis period and the matching Strava `before` timestamp.
 
     Args:
-        activity: Activity dict from Strava.
-        config_obj: UserConfig with max_hr and threshold_pace_min_per_km.
+        end_date: "YYYY-MM-DD" to analyze a past period, or None for today.
 
     Returns:
-        TSS value (typically 0-500+).
+        (last day included, UNIX timestamp activities must start before).
+
+    Raises:
+        ValueError: If end_date is not a valid ISO date.
     """
-    moving_time_hours = float(activity["moving_time"]) / 3600
-    sport_type = activity.get("sport_type", "").lower()
-
-    # For running activities, use pace-based rTSS
-    if "run" in sport_type:
-        avg_speed_ms = float(activity["average_speed"])
-
-        # Threshold pace in m/s
-        threshold_pace_min_per_km = config_obj.threshold_pace_min_per_km
-        threshold_speed_ms = 1000 / (threshold_pace_min_per_km * 60)
-
-        # Intensity factor: threshold pace / activity pace, i.e. activity speed / threshold speed
-        intensity_factor = avg_speed_ms / threshold_speed_ms
-
-        # rTSS = (hours) * IF^2 * 100
-        r_tss = moving_time_hours * (intensity_factor ** 2) * 100
-        return r_tss
-
-    # For other sports with HR data, use hrTSS
-    if activity.get("average_heartrate") is not None:
-        avg_hr = float(activity["average_heartrate"])
-        max_hr = config_obj.max_hr
-
-        hr_tss = moving_time_hours * ((avg_hr / max_hr) ** 2) * 100
-        return hr_tss
-
-    # Fallback: estimate based on duration alone (moderate intensity)
-    return moving_time_hours * 50
+    now = datetime.now(UTC)
+    if end_date:
+        try:
+            day = date.fromisoformat(end_date)
+        except ValueError as e:
+            raise ValueError(f"end_date must be YYYY-MM-DD, got {end_date!r}") from e
+        if day < now.date():
+            return day, _day_start_ts(day + timedelta(days=1))
+    return now.date(), int(now.timestamp())
 
 
 def _build_daily_tss_series(
-    activities: list[dict], config_obj: UserConfig
+    activities: list[dict],
+    config_obj: UserConfig,
+    end_day: date | None = None,
+    start_day: date | None = None,
 ) -> list[tuple[date, float]]:
     """Build a daily TSS series from activities.
 
     Args:
         activities: List of activity dicts.
         config_obj: UserConfig instance.
+        end_day: Last day of the series (default: today, UTC).
+        start_day: First day of the series (default: the first activity's day).
 
     Returns:
         List of (date, daily_tss) tuples in chronological order, one per calendar day
-        from the first activity through today (UTC). Rest days have 0 TSS so that
-        CTL/ATL decay correctly.
+        from `start_day` through `end_day`, or [] if there are no activities. Rest days
+        have 0 TSS so that CTL/ATL decay correctly.
     """
     daily_tss: dict[date, float] = {}
 
     for activity in activities:
-        activity_date = datetime.fromisoformat(
-            activity["start_date"].replace("Z", "+00:00")
-        ).date()
-        tss = _calculate_tss(activity, config_obj)
+        activity_date = _activity_date(activity)
+        tss, _ = calculate_tss(activity, config_obj)
 
         if activity_date not in daily_tss:
             daily_tss[activity_date] = 0
@@ -87,8 +93,8 @@ def _build_daily_tss_series(
     if not daily_tss:
         return []
 
-    first_day = min(daily_tss)
-    last_day = max(max(daily_tss), datetime.now(UTC).date())
+    first_day = min(min(daily_tss), start_day or min(daily_tss))
+    last_day = max(max(daily_tss), end_day or datetime.now(UTC).date())
     return [
         (day, daily_tss.get(day, 0.0))
         for day in (first_day + timedelta(days=i) for i in range((last_day - first_day).days + 1))
@@ -128,30 +134,102 @@ def _compute_ctl_atl_tsb(
 CTL_WARMUP_DAYS = 3 * 42
 
 
-async def _fetch_training_loads(
-    days: int,
-) -> tuple[list[DailyTrainingLoad], list[dict]]:
+class LoadWindow(NamedTuple):
+    """Daily loads for an analysis window, plus the data they were computed from."""
+
+    loads: list[DailyTrainingLoad]
+    activities: list[dict]
+    tss_methods: dict[str, int]
+    end_day: date
+    end_ts: int
+
+
+async def _fetch_training_loads(days: int, end_date: str | None = None) -> LoadWindow:
     """Fetch activities and compute daily loads with a CTL warm-up period.
 
     Loads are computed from `days + CTL_WARMUP_DAYS` of history, then trimmed to the
-    last `days` days (ending today).
+    last `days` days ending on `end_date` (default today).
 
     Args:
         days: Number of days to return loads for.
+        end_date: "YYYY-MM-DD" last day of the window, or None for today.
 
     Returns:
-        Tuple of (daily loads within the window, all fetched activities incl. warm-up).
+        LoadWindow with the window's loads, all fetched activities (incl. warm-up),
+        TSS method counts for activities in the window, and the window end.
     """
     client = get_client()
     config = get_config()
 
-    now = datetime.now(UTC)
-    cutoff_time = int((now - timedelta(days=days + CTL_WARMUP_DAYS)).timestamp())
-    activities = await client.get_all_activities(after=cutoff_time)
+    end_day, end_ts = _resolve_period_end(end_date)
+    window_start = end_day - timedelta(days=days - 1)
+    fetch_start = window_start - timedelta(days=CTL_WARMUP_DAYS)
+    activities = await client.get_all_activities(after=_day_start_ts(fetch_start), before=end_ts)
 
-    daily_loads = _compute_ctl_atl_tsb(_build_daily_tss_series(activities, config))
-    window_start = now.date() - timedelta(days=days - 1)
-    return [load for load in daily_loads if load.date >= window_start], activities
+    daily_loads = _compute_ctl_atl_tsb(
+        _build_daily_tss_series(activities, config, end_day, start_day=fetch_start)
+    )
+    tss_methods: Counter[str] = Counter(
+        calculate_tss(a, config)[1] for a in activities if _activity_date(a) >= window_start
+    )
+    return LoadWindow(
+        loads=[load for load in daily_loads if load.date >= window_start],
+        activities=activities,
+        tss_methods=dict(tss_methods),
+        end_day=end_day,
+        end_ts=end_ts,
+    )
+
+
+# Uncached stream downloads allowed per zone-distribution call (Strava allows 100 / 15 min)
+MAX_STREAM_FETCHES = 50
+
+
+async def _load_streams(
+    client: StravaClient, activities: list[dict], config: UserConfig
+) -> tuple[dict[int, dict[str, list]], str | None]:
+    """Streams for activities that benefit from them: disk cache first, then the API.
+
+    Newest activities are fetched first. Fetching stops at MAX_STREAM_FETCHES, on rate
+    limiting, or on an authentication error; those activities fall back to averages.
+
+    Returns:
+        (normalized streams by activity id, reason fetching stopped early or None).
+    """
+    streams: dict[int, dict[str, list]] = {}
+    budget = MAX_STREAM_FETCHES
+    stopped: str | None = None
+
+    for activity in sorted(activities, key=lambda a: str(a["start_date"]), reverse=True):
+        activity_id = activity.get("id")
+        if activity_id is None or not wants_streams(activity, config):
+            continue
+
+        raw = stream_cache.load(activity_id)
+        if raw is None:
+            if stopped:
+                continue
+            if budget <= 0:
+                stopped = "budget"
+                continue
+            budget -= 1
+            try:
+                raw = await client.get_activity_streams(activity_id, STREAM_KEYS)
+            except RuntimeError as e:
+                message = str(e).lower()
+                if "rate limit" in message or "authentication" in message:
+                    stopped = "rate_limit" if "rate limit" in message else "auth"
+                    continue
+                if "http 404" not in message:
+                    continue  # transient error: don't cache, retry next time
+                raw = {}  # activity has no streams (e.g. manual entry)
+            stream_cache.save(activity_id, raw)
+
+        normalized = normalize_streams(raw)
+        if normalized:
+            streams[activity_id] = normalized
+
+    return streams, stopped
 
 
 def _determine_training_phase(daily_loads: list[DailyTrainingLoad]) -> TrainingPhase:
@@ -192,7 +270,7 @@ def _determine_training_phase(daily_loads: list[DailyTrainingLoad]) -> TrainingP
             return "detraining"
 
 
-async def get_training_load(days: int = 42) -> dict:
+async def get_training_load(days: int = 42, end_date: str | None = None) -> dict:
     """Analyze training load and fitness/fatigue balance over a period.
 
     Computes CTL (Chronic Training Load = fitness), ATL (Acute Training Load = fatigue),
@@ -205,11 +283,13 @@ async def get_training_load(days: int = 42) -> dict:
 
     Args:
         days: Number of days to analyze (default 42).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
 
     Returns:
         TrainingLoadSummary as dict.
     """
-    daily_loads, _ = await _fetch_training_loads(days)
+    window = await _fetch_training_loads(days, end_date)
+    daily_loads = window.loads
 
     if not daily_loads:
         # No activities, return empty summary
@@ -264,17 +344,21 @@ async def get_training_load(days: int = 42) -> dict:
         current_tsb=current_tsb,
         phase=phase,
         interpretation=interpretation,
+        tss_methods=window.tss_methods,
     )
 
     return summary.model_dump()
 
 
-async def get_zone_distribution(days: int = 30) -> dict:
-    """Analyze heart rate zone distribution over a training period.
+async def get_zone_distribution(
+    days: int = 30, end_date: str | None = None, use_streams: bool = True
+) -> dict:
+    """Analyze intensity zone distribution over a training period.
 
-    Computes the percentage of total training time spent in each heart rate zone (Z1-Z5).
-    Also calculates a polarization index to check if training follows the 80/20 rule
-    (80% easy, 20% hard).
+    Computes the percentage of training time in each intensity zone (Z1-Z5) and a
+    polarization index for the 80/20 rule (80% easy, 20% hard). Each activity uses the
+    best data available: second-by-second power, heart rate or pace streams, falling back
+    to activity averages. `data_sources` and `data_quality` report what was used.
 
     Use this to answer questions like:
     - "Am I training easy enough?"
@@ -283,6 +367,8 @@ async def get_zone_distribution(days: int = 30) -> dict:
 
     Args:
         days: Number of days to analyze (default 30).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
+        use_streams: Fetch second-by-second streams when useful (default True).
 
     Returns:
         ZoneDistribution as dict.
@@ -290,95 +376,47 @@ async def get_zone_distribution(days: int = 30) -> dict:
     client = get_client()
     config = get_config()
 
-    cutoff_time = int(
-        (datetime.now(UTC) - timedelta(days=days)).timestamp()
+    end_day, end_ts = _resolve_period_end(end_date)
+    activities = await client.get_all_activities(
+        after=_day_start_ts(end_day - timedelta(days=days - 1)), before=end_ts
     )
-    activities = await client.get_all_activities(after=cutoff_time)
+    streams, stopped = (
+        await _load_streams(client, activities, config) if use_streams else ({}, None)
+    )
 
-    max_hr = config.max_hr
-
-    zone_times = {
-        1: 0,  # < 60%
-        2: 0,  # 60-70%
-        3: 0,  # 70-80%
-        4: 0,  # 80-90%
-        5: 0,  # 90-100%
-    }
-
+    zone_times = [0.0] * 5
+    sources: Counter[str] = Counter()
+    excluded = 0
     for activity in activities:
-        avg_hr = activity.get("average_heartrate")
-
-        if avg_hr is None:
+        result = activity_zone_times(activity, streams.get(activity.get("id", -1)), config)
+        if result is None:
+            excluded += 1
             continue
+        activity_times, source = result
+        zone_times = [total + t for total, t in zip(zone_times, activity_times, strict=True)]
+        sources[source] += 1
 
-        hr_pct = (avg_hr / max_hr) * 100
-        moving_time = activity["moving_time"]
-
-        # Classify activity into zone based on average HR
-        if hr_pct < 60:
-            zone = 1
-        elif hr_pct < 70:
-            zone = 2
-        elif hr_pct < 80:
-            zone = 3
-        elif hr_pct < 90:
-            zone = 4
-        else:
-            zone = 5
-
-        zone_times[zone] += moving_time
-
-    total_time = sum(zone_times.values())
+    total_time = sum(zone_times)
+    data_quality = _describe_zone_data_quality(sources, excluded, config, stopped)
 
     if total_time == 0:
         return ZoneDistribution(
             zones=[],
             total_time_seconds=0,
             polarization_index=0,
-            assessment="No training data with heart rate available.",
+            assessment="No activities with heart rate, power or pace data in this period.",
+            excluded_activities=excluded,
+            data_quality=data_quality,
         ).model_dump()
 
     zone_buckets = [
         ZoneBucket(
-            zone_name="Z1 (Recovery)",
-            zone_number=1,
-            min_hr_pct=0,
-            max_hr_pct=60,
-            time_seconds=zone_times[1],
-            percentage=(zone_times[1] / total_time) * 100,
-        ),
-        ZoneBucket(
-            zone_name="Z2 (Aerobic)",
-            zone_number=2,
-            min_hr_pct=60,
-            max_hr_pct=70,
-            time_seconds=zone_times[2],
-            percentage=(zone_times[2] / total_time) * 100,
-        ),
-        ZoneBucket(
-            zone_name="Z3 (Tempo)",
-            zone_number=3,
-            min_hr_pct=70,
-            max_hr_pct=80,
-            time_seconds=zone_times[3],
-            percentage=(zone_times[3] / total_time) * 100,
-        ),
-        ZoneBucket(
-            zone_name="Z4 (Threshold)",
-            zone_number=4,
-            min_hr_pct=80,
-            max_hr_pct=90,
-            time_seconds=zone_times[4],
-            percentage=(zone_times[4] / total_time) * 100,
-        ),
-        ZoneBucket(
-            zone_name="Z5 (VO2max)",
-            zone_number=5,
-            min_hr_pct=90,
-            max_hr_pct=100,
-            time_seconds=zone_times[5],
-            percentage=(zone_times[5] / total_time) * 100,
-        ),
+            zone_name=ZONE_NAMES[i],
+            zone_number=i + 1,
+            time_seconds=round(seconds),
+            percentage=seconds / total_time * 100,
+        )
+        for i, seconds in enumerate(zone_times)
     ]
 
     easy_pct = zone_buckets[0].percentage + zone_buckets[1].percentage
@@ -406,13 +444,61 @@ async def get_zone_distribution(days: int = 30) -> dict:
 
     return ZoneDistribution(
         zones=zone_buckets,
-        total_time_seconds=total_time,
+        total_time_seconds=round(total_time),
         polarization_index=polarization_index,
         assessment=assessment,
+        data_sources=dict(sources),
+        excluded_activities=excluded,
+        data_quality=data_quality,
     ).model_dump()
 
 
-async def get_fitness_trend(weeks: int = 8) -> dict:
+def _describe_zone_data_quality(
+    sources: Counter[str], excluded: int, config: UserConfig, stopped: str | None
+) -> str:
+    """Plain-text note on which data the zone distribution is based on."""
+    analysed = sum(sources.values())
+    if not analysed:
+        notes = ["No activity had heart rate, power or pace data."]
+    else:
+        detailed = sum(n for source, n in sources.items() if source.endswith("_stream"))
+        notes = [f"{detailed} of {analysed} activities analysed second by second."]
+        if analysed > detailed:
+            notes.append(
+                f"{analysed - detailed} used activity averages, which are coarse: "
+                "the whole session counts in a single zone."
+            )
+    if any(source.startswith("hr_") for source in sources):
+        if config.hr_zone_bounds:
+            notes.append("HR zones come from your Strava custom zones.")
+        else:
+            notes.append(
+                f"HR zones are % of max HR ({config.max_hr} bpm); "
+                "run `strava-sport-science-setup calibrate` to personalize."
+            )
+    if any(source.startswith("pace_") for source in sources):
+        notes.append(
+            "Runs without heart rate use pace zones (Friel) from threshold pace "
+            f"{format_pace(config.threshold_pace_min_per_km)}."
+        )
+    if any(source.startswith("power_") for source in sources):
+        notes.append(f"Power zones (Coggan) from FTP {config.ftp_watts} W.")
+    if excluded:
+        notes.append(f"{excluded} activities skipped: no heart rate, power or pace data.")
+    if stopped == "rate_limit":
+        notes.append("Strava rate limit reached; some activities fell back to averages.")
+    elif stopped == "auth":
+        notes.append("Stream download failed (authentication); averages used instead.")
+    elif stopped == "budget":
+        notes.append(
+            f"Stream downloads are capped at {MAX_STREAM_FETCHES} per call; remaining "
+            "activities used averages. Downloaded streams are cached, so re-running "
+            "extends coverage."
+        )
+    return " ".join(notes)
+
+
+async def get_fitness_trend(weeks: int = 8, end_date: str | None = None) -> dict:
     """Analyze weekly training volume and intensity trends.
 
     Groups activities by week and shows how distance, duration, TSS,
@@ -426,6 +512,7 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
 
     Args:
         weeks: Number of weeks to analyze (default 8).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
 
     Returns:
         FitnessTrendSummary as dict.
@@ -433,19 +520,16 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
     client = get_client()
     config = get_config()
 
-    cutoff_time = int(
-        (datetime.now(UTC) - timedelta(weeks=weeks)).timestamp()
+    end_day, end_ts = _resolve_period_end(end_date)
+    activities = await client.get_all_activities(
+        after=_day_start_ts(end_day - timedelta(weeks=weeks) + timedelta(days=1)), before=end_ts
     )
-    activities = await client.get_all_activities(after=cutoff_time)
 
     # Group by ISO week
     weekly_data: dict[tuple[int, int], dict] = {}  # (year, week) -> data
 
     for activity in activities:
-        activity_date = datetime.fromisoformat(
-            activity["start_date"].replace("Z", "+00:00")
-        ).date()
-        iso_year, iso_week, _ = activity_date.isocalendar()
+        iso_year, iso_week, _ = _activity_date(activity).isocalendar()
         key = (iso_year, iso_week)
 
         if key not in weekly_data:
@@ -459,7 +543,7 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
 
         weekly_data[key]["distances"].append(activity["distance"])
         weekly_data[key]["moving_times"].append(activity["moving_time"])
-        weekly_data[key]["tss_values"].append(_calculate_tss(activity, config))
+        weekly_data[key]["tss_values"].append(calculate_tss(activity, config)[0])
         if activity.get("average_heartrate"):
             weekly_data[key]["hrs"].append(activity["average_heartrate"])
         weekly_data[key]["count"] += 1
@@ -550,7 +634,9 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
     ).model_dump()
 
 
-async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
+async def get_race_readiness(
+    target_distance_km: float = 10.0, end_date: str | None = None
+) -> dict:
     """Assess readiness to race a given distance.
 
     Scores race readiness from 0 to 100 based on four factors:
@@ -565,12 +651,15 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
 
     Args:
         target_distance_km: Target race distance (default 10).
+        end_date: Assess readiness as of this day, YYYY-MM-DD (default today).
 
     Returns:
         RaceReadiness as dict.
     """
     # Long-run and consistency checks below filter activities to their own 21/28-day windows
-    daily_loads, activities = await _fetch_training_loads(days=42)
+    window = await _fetch_training_loads(days=42, end_date=end_date)
+    daily_loads, activities = window.loads, window.activities
+    period_end = datetime.fromtimestamp(window.end_ts, UTC)
 
     current_ctl = daily_loads[-1].ctl if daily_loads else 0
     current_tsb = daily_loads[-1].tsb if daily_loads else 0
@@ -619,9 +708,7 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
     freshness_score = max(0, min(25, freshness_score))
 
     # Score 3: Long run
-    long_run_cutoff = (
-        datetime.now(UTC) - timedelta(days=21)
-    ).timestamp()
+    long_run_cutoff = (period_end - timedelta(days=21)).timestamp()
     recent_activities = [
         a for a in activities
         if float(datetime.fromisoformat(
@@ -647,9 +734,7 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
         long_run_score = 0.0
 
     # Score 4: Consistency
-    recent_28_days = (
-        datetime.now(UTC) - timedelta(days=28)
-    ).timestamp()
+    recent_28_days = (period_end - timedelta(days=28)).timestamp()
     recent_all = [
         a for a in activities
         if float(datetime.fromisoformat(

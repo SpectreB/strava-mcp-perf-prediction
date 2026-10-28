@@ -72,3 +72,15 @@ def test_set_env_var_updates_existing_and_appends_missing(tmp_path: Path) -> Non
     assert read_env_file(env) == {"STRAVA_CLIENT_ID": "123", "STRAVA_REFRESH_TOKEN": "new", "OTHER": "x"}
     assert env.read_text().startswith("# comment\n")
     assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_custom_hr_zone_bounds_only_uses_custom_zones() -> None:
+    from strava_sport_science_mcp.setup_cli import custom_hr_zone_bounds
+
+    zones = [{"min": 0, "max": 130}, {"min": 130, "max": 150}, {"min": 150, "max": 165},
+             {"min": 165, "max": 178}, {"min": 178, "max": -1}]
+    assert custom_hr_zone_bounds({"heart_rate": {"custom_zones": True, "zones": zones}}) == [
+        130, 150, 165, 178
+    ]
+    assert custom_hr_zone_bounds({"heart_rate": {"custom_zones": False, "zones": zones}}) is None
+    assert custom_hr_zone_bounds({}) is None

@@ -27,26 +27,34 @@ class TrainingLoadSummary(BaseModel):
     current_tsb: float = Field(..., description="Current TSB (freshness)")
     phase: TrainingPhase = Field(..., description="Current training phase")
     interpretation: str = Field(..., description="Plain-text interpretation of current state")
+    tss_methods: dict[str, int] = Field(
+        default_factory=dict,
+        description="Activities in the window per TSS method (power, pace, heart_rate, duration)",
+    )
 
 
 class ZoneBucket(BaseModel):
-    """Heart rate zone bucket."""
+    """Intensity zone bucket."""
 
     zone_name: str = Field(..., description="Zone name (Z1, Z2, etc.)")
     zone_number: int = Field(..., description="Zone number (1-5)")
-    min_hr_pct: float = Field(..., description="Min HR as % of max HR")
-    max_hr_pct: float = Field(..., description="Max HR as % of max HR")
     time_seconds: int = Field(..., description="Time in zone (seconds)")
     percentage: float = Field(..., description="Percentage of total time")
 
 
 class ZoneDistribution(BaseModel):
-    """Heart rate zone distribution."""
+    """Intensity zone distribution."""
 
-    zones: list[ZoneBucket] = Field(..., description="HR zones and time spent in each")
+    zones: list[ZoneBucket] = Field(..., description="Intensity zones and time spent in each")
     total_time_seconds: int = Field(..., description="Total training time (seconds)")
     polarization_index: float = Field(..., description="Easy % minus hard % (80/20 ideal)")
     assessment: str = Field(..., description="Assessment of intensity distribution")
+    data_sources: dict[str, int] = Field(
+        default_factory=dict,
+        description="Activities per data source (e.g. hr_stream, pace_average)",
+    )
+    excluded_activities: int = Field(0, description="Activities without any intensity data")
+    data_quality: str = Field("", description="How reliable the distribution is, and why")
 
 
 class WeeklyTrainingMetrics(BaseModel):

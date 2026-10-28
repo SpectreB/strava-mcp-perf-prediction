@@ -81,42 +81,52 @@ async def get_activity_streams(
 
 
 @mcp.tool()
-async def get_training_load(days: int = 42) -> dict:
+async def get_training_load(days: int = 42, end_date: str | None = None) -> dict:
     """Analyze training load and fitness/fatigue balance.
 
     Computes CTL (fitness), ATL (fatigue), and TSB (form) using the Banister model.
+
+    TSS per activity uses the best data available (power > pace > heart rate > duration);
+    `tss_methods` reports which. Pass `end_date` to analyze a past period.
 
     Use this to answer: "Am I overtraining?" or "How has my fitness evolved?"
 
     Args:
         days: Number of days to analyze (default 42).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
 
     Returns:
         TrainingLoadSummary as dict.
     """
-    return await sport_science.get_training_load(days)
+    return await sport_science.get_training_load(days, end_date)
 
 
 @mcp.tool()
-async def get_zone_distribution(days: int = 30) -> dict:
-    """Analyze heart rate zone distribution.
+async def get_zone_distribution(
+    days: int = 30, end_date: str | None = None, use_streams: bool = True
+) -> dict:
+    """Analyze intensity zone distribution.
 
-    Computes the percentage of training time in each HR zone (Z1-Z5) and checks
-    if training follows the 80/20 polarization rule.
+    Computes the percentage of training time in each intensity zone (Z1-Z5) and checks
+    if training follows the 80/20 polarization rule. Each activity uses the best data
+    available: second-by-second power, heart rate or pace, else activity averages.
+    Always relay `data_quality` to the user: it says how reliable the result is.
 
     Use this to answer: "Am I training easy enough?"
 
     Args:
         days: Number of days to analyze (default 30).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
+        use_streams: Download second-by-second data when useful (default True).
 
     Returns:
         ZoneDistribution as dict.
     """
-    return await sport_science.get_zone_distribution(days)
+    return await sport_science.get_zone_distribution(days, end_date, use_streams)
 
 
 @mcp.tool()
-async def get_fitness_trend(weeks: int = 8) -> dict:
+async def get_fitness_trend(weeks: int = 8, end_date: str | None = None) -> dict:
     """Analyze weekly training volume and intensity trends.
 
     Groups activities by week and shows how distance, duration, and intensity evolve.
@@ -126,15 +136,18 @@ async def get_fitness_trend(weeks: int = 8) -> dict:
 
     Args:
         weeks: Number of weeks to analyze (default 8).
+        end_date: Last day of the period as YYYY-MM-DD (default today).
 
     Returns:
         FitnessTrendSummary as dict.
     """
-    return await sport_science.get_fitness_trend(weeks)
+    return await sport_science.get_fitness_trend(weeks, end_date)
 
 
 @mcp.tool()
-async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
+async def get_race_readiness(
+    target_distance_km: float = 10.0, end_date: str | None = None
+) -> dict:
     """Assess readiness to race a given distance.
 
     Scores readiness 0-100 based on fitness, freshness, long run progress, and consistency.
@@ -145,18 +158,20 @@ async def get_race_readiness(target_distance_km: float = 10.0) -> dict:
 
     Args:
         target_distance_km: Target race distance.
+        end_date: Assess readiness as of this day, YYYY-MM-DD (default today).
 
     Returns:
         RaceReadiness as dict.
     """
-    return await sport_science.get_race_readiness(target_distance_km)
+    return await sport_science.get_race_readiness(target_distance_km, end_date)
 
 
 @mcp.resource("config://settings")
 async def get_settings() -> str:
     """Return the current user settings.
 
-    Returns JSON with max_hr, resting_hr, threshold_pace_min_per_km, weight_kg.
+    Returns JSON with max_hr, resting_hr, threshold_pace_min_per_km, weight_kg,
+    lthr, ftp_watts and hr_zone_bounds.
     """
     if deps.config is None:
         raise RuntimeError("Config not initialized")

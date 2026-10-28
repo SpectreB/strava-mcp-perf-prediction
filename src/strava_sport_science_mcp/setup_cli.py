@@ -23,6 +23,7 @@ import httpx
 from strava_sport_science_mcp.auth import StravaAuth
 from strava_sport_science_mcp.config import UserConfig
 from strava_sport_science_mcp.strava_client import StravaClient
+from strava_sport_science_mcp.tools.intensity import format_pace
 
 AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 TOKEN_URL = "https://www.strava.com/oauth/token"
@@ -221,23 +222,35 @@ def estimate_max_hr(activities: list[dict]) -> tuple[int, dict] | None:
     return round(top["max_heartrate"]), top
 
 
-def _format_pace(pace: float) -> str:
-    minutes, seconds = divmod(round(pace * 60), 60)
-    return f"{minutes}:{seconds:02d}/km"
+def custom_hr_zone_bounds(zones: dict) -> list[int] | None:
+    """Upper bounds of HR zones 1-4 from Strava's /athlete/zones, if the athlete set them.
+
+    Strava's default zones are derived from age, so only custom zones are used.
+    """
+    heart_rate = zones.get("heart_rate") or {}
+    buckets = heart_rate.get("zones") or []
+    if not heart_rate.get("custom_zones") or len(buckets) != 5:
+        return None
+    bounds = [int(bucket["max"]) for bucket in buckets[:4]]
+    return bounds if all(b > 0 for b in bounds) and bounds == sorted(bounds) else None
 
 
-async def _fetch_for_calibration(env_path: Path) -> tuple[list[dict], dict]:
+async def _fetch_for_calibration(env_path: Path) -> tuple[list[dict], dict, dict | None]:
     for key, value in read_env_file(env_path).items():
         os.environ.setdefault(key, value)
     client = StravaClient(StravaAuth())
     activities = await client.get_all_activities()
     athlete = await client.get_athlete()
-    return activities, athlete
+    try:
+        zones: dict | None = await client.get_athlete_zones()
+    except RuntimeError:
+        zones = None  # needs the profile:read_all scope
+    return activities, athlete, zones
 
 
 def run_calibrate(env_path: Path, dry_run: bool = False) -> None:
     """Estimate settings from Strava data and update settings.json."""
-    activities, athlete = asyncio.run(_fetch_for_calibration(env_path))
+    activities, athlete, zones = asyncio.run(_fetch_for_calibration(env_path))
     config = UserConfig.load()
     runs = [a for a in activities if "run" in str(a.get("sport_type", "")).lower()]
     print(f"Fetched {len(activities)} activities ({len(runs)} runs).")
@@ -247,7 +260,7 @@ def run_calibrate(env_path: Path, dry_run: bool = False) -> None:
         value, run = pace
         config.threshold_pace_min_per_km = round(value, 2)
         print(
-            f"threshold pace: {_format_pace(value)} "
+            f"threshold pace: {format_pace(value)} "
             f"(from {run['distance'] / 1000:.1f} km in {run['moving_time'] / 60:.0f} min "
             f"on {str(run['start_date'])[:10]}; training runs make this conservative)"
         )
@@ -264,6 +277,23 @@ def run_calibrate(env_path: Path, dry_run: bool = False) -> None:
         )
     else:
         print(f"max HR: no heart-rate data in activities, kept {config.max_hr}")
+
+    bounds = custom_hr_zone_bounds(zones) if zones else None
+    if bounds:
+        config.hr_zone_bounds = bounds
+        print(f"HR zones: your Strava custom zones (Z1-Z4 upper bounds {bounds} bpm)")
+    elif zones is None:
+        print("HR zones: Strava zones not readable (needs profile:read_all), using % of max HR")
+    else:
+        config.hr_zone_bounds = None
+        print("HR zones: no custom zones on Strava (defaults are age-based), using % of max HR")
+
+    ftp = athlete.get("ftp")
+    if ftp:
+        config.ftp_watts = int(ftp)
+        print(f"FTP: {config.ftp_watts} W (from Strava profile)")
+    else:
+        print(f"FTP: not set on Strava, kept {config.ftp_watts}")
 
     weight = athlete.get("weight")
     if weight:

@@ -15,6 +15,25 @@ class UserConfig(BaseModel):
         default=5.0, description="Functional threshold pace (min/km)"
     )
     weight_kg: float = Field(default=70, description="Body weight (kg)")
+    lthr: int | None = Field(
+        default=None,
+        description="Lactate threshold heart rate (bpm); estimated as 90% of max_hr if unset",
+    )
+    ftp_watts: int | None = Field(
+        default=None, description="Functional threshold power (W); enables power-based TSS/zones"
+    )
+    hr_zone_bounds: list[int] | None = Field(
+        default=None,
+        description=(
+            "Upper bounds (bpm) of HR zones 1-4, e.g. from Strava custom zones; "
+            "zones are % of max_hr if unset"
+        ),
+    )
+
+    @property
+    def threshold_hr(self) -> float:
+        """LTHR if configured, else the common 90%-of-max-HR estimate."""
+        return float(self.lthr) if self.lthr else 0.9 * self.max_hr
 
     @classmethod
     def config_path(cls) -> Path:
