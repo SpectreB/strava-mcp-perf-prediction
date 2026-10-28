@@ -59,12 +59,12 @@ Use it with Claude Desktop or any MCP-compatible client to analyze your training
 
 ### Install
 
-```bash
-# Latest release
-uvx strava-sport-science-mcp
+Not yet published on PyPI; run it from a clone:
 
-# Or install locally for development
-uv pip install strava-sport-science-mcp
+```bash
+git clone https://github.com/SpectreB/strava-mcp-perf-prediction.git
+cd strava-mcp-perf-prediction
+uv sync
 ```
 
 ### Configure
@@ -80,19 +80,18 @@ claude mcp add strava-sport-science -- \
 
 ### Use with Claude Desktop
 
-Add to `~/.config/Claude/claude_desktop_config.json` (macOS/Linux) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows), using absolute paths (Claude Desktop does not inherit your shell's `PATH`; find uv with `which uv`):
 
 ```json
 {
   "mcpServers": {
     "strava-sport-science": {
-      "command": "uvx",
-      "args": ["strava-sport-science-mcp"],
-      "env": {
-        "STRAVA_CLIENT_ID": "your_client_id",
-        "STRAVA_CLIENT_SECRET": "your_client_secret",
-        "STRAVA_REFRESH_TOKEN": "your_refresh_token"
-      }
+      "command": "/absolute/path/to/uv",
+      "args": [
+        "--directory", "/absolute/path/to/strava-mcp-perf-prediction",
+        "run", "--env-file", "/absolute/path/to/strava-mcp-perf-prediction/.env",
+        "strava-sport-science-mcp"
+      ]
     }
   }
 }
@@ -108,10 +107,12 @@ Restart Claude Desktop. The tools will appear in the tool picker.
 | **get_activity_detail** | Full activity details | `activity_id` | "Get details for activity 12345" |
 | **get_athlete_profile** | Your Strava profile | — | "What's my Strava profile?" |
 | **get_activity_streams** | Second-by-second data | `activity_id`, `stream_types` | "Get HR data for my last run" |
-| **get_training_load** | CTL/ATL/TSB analysis | `days` (default 42) | "Am I overtraining? Analyze my fatigue." |
-| **get_zone_distribution** | HR zone breakdown | `days` (default 30) | "Am I training easy enough? Show zones." |
-| **get_fitness_trend** | Weekly volume/intensity | `weeks` (default 8) | "How has my training progressed?" |
-| **get_race_readiness** | Race readiness score | `target_distance_km` (default 10) | "Am I ready for a 10K this weekend?" |
+| **get_training_load** | CTL/ATL/TSB analysis | `days` (default 42), `end_date` | "Am I overtraining? Analyze my fatigue." |
+| **get_zone_distribution** | Intensity zone breakdown | `days` (default 30), `end_date`, `use_streams` | "Am I training easy enough? Show zones." |
+| **get_fitness_trend** | Weekly volume/intensity | `weeks` (default 8), `end_date` | "How has my training progressed?" |
+| **get_race_readiness** | Race readiness score | `target_distance_km` (default 10), `end_date` | "Am I ready for a 10K this weekend?" |
+
+All sport-science tools accept `end_date` (`YYYY-MM-DD`) to analyze a past period, e.g. "How was my form on June 7, 2026?"
 
 ### Example Conversations
 
@@ -137,30 +138,29 @@ Restart Claude Desktop. The tools will appear in the tool picker.
 
 ## How It Works
 
+### Data pipeline: best source first, with fallbacks
+
+Each activity is analyzed with the most precise data it offers; coarser data is used only when better data is missing. Outputs report what was used (`tss_methods`, `data_sources`, `data_quality`) so the assistant can say how reliable a result is.
+
+| Metric | 1. Best case | 2. | 3. | Last resort |
+|---|---|---|---|---|
+| **TSS** | Power: NP / FTP (power meter + `ftp_watts`) | Pace: runs, speed / threshold speed | Heart rate: HR reserve vs LTHR | Duration (50 TSS/h) |
+| **Zones** | Power stream (second by second) | Heart-rate stream | Pace stream (runs) | Activity average: power > HR > pace |
+| **HR zone bounds** | Your custom Strava zones | % of max HR | | |
+
 ### Training Stress Score (TSS)
 
-For **running**, we use **pace-based rTSS** (running Training Stress Score):
+Every method uses `TSS = hours × IF² × 100`, so one hour at threshold = 100 TSS. Only the intensity factor (IF) changes:
 
 ```
-Intensity Factor (IF) = Threshold Pace / Activity Pace
-rTSS = (hours) × IF² × 100
+Power:       IF = normalized power / FTP
+Pace (runs): IF = activity speed / threshold speed   (= threshold pace / activity pace)
+Heart rate:  IF = (avg HR − resting HR) / (LTHR − resting HR)   (LTHR defaults to 90% of max HR)
 ```
 
-By definition: 1 hour at exactly threshold pace = 100 TSS.
+Without any intensity data, a moderate effort is assumed: `TSS = hours × 50`.
 
-For **other sports** without recent pace calibration, we fall back to **hrTSS** (heart rate based):
-
-```
-hrTSS = (hours) × (avg_HR / max_HR)² × 100
-```
-
-If no HR data is available, we estimate conservatively:
-
-```
-TSS = moving_time_hours × 50
-```
-
-**Reference:** Coggan, A. (2020). *Training and Racing with Power*; Dr. T. Stegner's research on rTSS.
+**References:** Allen, H. & Coggan, A. *Training and Racing with a Power Meter* (TSS, NP, IF); rTSS and hrTSS follow the same model with pace and heart rate.
 
 ### CTL, ATL, TSB (Banister Model)
 
@@ -185,7 +185,19 @@ TSB_today = CTL_today - ATL_today
 
 **Reference:** Banister, E. W., et al. (1975). "Modeling the Training Response in Athletes." *Australian Journal of Sports Medicine*.
 
-### HR Zone Polarization
+### Intensity Zones and Polarization
+
+All zone models map to the same 5 intensity levels, so activities measured differently can be aggregated:
+
+| Zone | Heart rate (% max HR) | Pace (Friel, % of threshold pace) | Power (Coggan, % FTP) |
+|---|---|---|---|
+| Z1 Recovery | < 60% | slower than 129% | < 55% |
+| Z2 Aerobic | 60–70% | 114–129% | 55–75% |
+| Z3 Tempo | 70–80% | 106–114% | 75–90% |
+| Z4 Threshold | 80–90% | 99–106% | 90–105% |
+| Z5 VO2max | ≥ 90% | faster than 99% | ≥ 105% |
+
+Stream-based zones count each second of moving time; average-based zones put the whole session in one zone, which hides intervals. Streams are cached in `~/.cache/strava-sport-science-mcp/streams` (an activity's streams never change), and at most 50 are downloaded per call to stay within Strava's rate limits.
 
 Training is most effective when **80% of volume is easy (Z1-Z2) and 20% is hard (Z4-Z5)**, minimizing "no man's land" (Z3, tempo).
 
@@ -212,7 +224,10 @@ User settings are stored in `~/.config/strava-sport-science-mcp/settings.json`:
   "max_hr": 190,
   "resting_hr": 60,
   "threshold_pace_min_per_km": 5.0,
-  "weight_kg": 70
+  "weight_kg": 70,
+  "lthr": null,
+  "ftp_watts": null,
+  "hr_zone_bounds": null
 }
 ```
 
@@ -225,15 +240,17 @@ These are used to calibrate TSS, HR zones, and race readiness. If the file doesn
 | `threshold_pace_min_per_km` | Best 60-minute-equivalent pace (Riegel's formula) over runs of 15+ min from the last year. Training runs make it conservative; set it to a recent all-out 10K–half pace if you know it. |
 | `max_hr` | Highest `max_heartrate` recorded in your activities (a lower bound). Kept unchanged if no activity has heart-rate data. |
 | `weight_kg` | From your Strava profile (requires the `profile:read_all` scope). |
-| `resting_hr` | Not available from Strava; edit manually. |
+| `ftp_watts` | From your Strava profile, if set. Enables power-based TSS and zones. |
+| `hr_zone_bounds` | Upper bounds (bpm) of Z1–Z4 from your **custom** Strava HR zones. Strava's default zones are age-based, so they are ignored and zones fall back to % of `max_hr`. |
+| `resting_hr`, `lthr` | Not available from Strava; edit manually. `lthr` defaults to 90% of `max_hr`. |
 
 ## Development
 
 ### Clone and Install
 
 ```bash
-git clone https://github.com/yourusername/strava-sport-science-mcp.git
-cd strava-sport-science-mcp
+git clone https://github.com/SpectreB/strava-mcp-perf-prediction.git
+cd strava-mcp-perf-prediction
 
 uv sync --extra dev
 ```
@@ -271,11 +288,14 @@ src/strava_sport_science_mcp/
 ├── auth.py                  # OAuth2 token management
 ├── config.py                # User settings (max HR, threshold pace, etc.)
 ├── dependencies.py          # Shared dependency initialization
+├── setup_cli.py             # `strava-sport-science-setup`: OAuth + settings calibration
+├── stream_cache.py          # On-disk cache for activity streams
 ├── models/
 │   ├── activity.py          # Pydantic models for Strava data
 │   └── metrics.py           # Pydantic models for computed metrics
 └── tools/
     ├── raw.py               # 4 raw Strava tools
+    ├── intensity.py         # TSS and zone pipeline with data-source fallbacks
     └── sport_science.py     # 4 sport-science computed tools
 ```
 
@@ -292,19 +312,20 @@ Contributions welcome! Please:
 
 ## Roadmap
 
-- [ ] Cycling-specific TSS model (IF with power)
+- [x] Cycling-specific TSS model (IF with power)
+- [x] Custom zone thresholds (Strava custom HR zones, LTHR, FTP)
+- [ ] Grade-adjusted pace for hilly runs
 - [ ] Multi-sport periodization plans
 - [ ] Peak detection and form forecasting
 - [ ] Integration with nutrition/sleep logs
 - [ ] Strava segment analysis
-- [ ] Custom zone thresholds (LTHR, VDOT)
 
 ## Limitations
 
-- **Stream data:** Uses activity-level average HR for zone classification (not second-by-second) to minimize API calls
-- **Strava API Rate Limits:** 100 requests per 15 minutes, 1000 per day. The server respects these; check error messages if you hit limits
-- **Sport detection:** Assumes activities labeled "Run" use pace-based TSS; others fall back to HR-based or duration-based estimation
-- **No power data:** Currently focuses on HR and pace, not power meters
+- **Strava API rate limits:** 100 requests per 15 minutes, 1,000 per day. Stream downloads are capped per call and cached; when the limit is hit, zones fall back to activity averages and `data_quality` says so
+- **Pace ignores terrain:** run TSS and pace zones use raw speed, so hilly runs are under-rated (no grade adjustment yet)
+- **TSS uses activity averages:** stream data refines zones but not yet TSS
+- **Low-volume training:** with infrequent sessions, each run moves ATL far more than CTL, so phase labels such as "overreaching" can appear at very low absolute load
 
 ## License
 
@@ -319,7 +340,7 @@ Contributions welcome! Please:
 
 ## Support
 
-Found a bug or have a feature idea? Open an [issue](https://github.com/yourusername/strava-sport-science-mcp/issues).
+Found a bug or have a feature idea? Open an [issue](https://github.com/SpectreB/strava-mcp-perf-prediction/issues).
 
 ---
 
