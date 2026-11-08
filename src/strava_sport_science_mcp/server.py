@@ -1,8 +1,13 @@
 """MCP server entry point for Strava sport-science analysis."""
 
+import argparse
+import os
+import sys
+
 from mcp.server.fastmcp import FastMCP
 
 import strava_sport_science_mcp.dependencies as deps
+from strava_sport_science_mcp.http_app import run_http, validate_token
 from strava_sport_science_mcp.tools import raw, sport_science
 
 mcp = FastMCP(
@@ -221,8 +226,43 @@ def training_block_review(weeks: int = 8, end_date: str = "") -> str:
 {_GROUNDING_RULES}"""
 
 
-def main() -> None:
-    """Run the MCP server."""
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    env = os.environ.get
+    parser = argparse.ArgumentParser(
+        prog="strava-sport-science-mcp",
+        description="Strava sport-science MCP server (stdio by default).",
+    )
+    parser.add_argument(
+        "--transport", choices=["stdio", "http"], default=env("STRAVA_MCP_TRANSPORT", "stdio"),
+        help="stdio (local client launches the server) or http (streamable HTTP, personal use)",
+    )
+    parser.add_argument(
+        "--host", default=env("STRAVA_MCP_HOST", "127.0.0.1"),
+        help="HTTP bind address (default 127.0.0.1; keep it and expose via a tunnel)",
+    )
+    parser.add_argument("--port", type=int, default=int(env("STRAVA_MCP_PORT", "8000")))
+    parser.add_argument(
+        "--allowed-host", action="append", dest="allowed_hosts",
+        default=[h for h in env("STRAVA_MCP_ALLOWED_HOSTS", "").split(",") if h],
+        help="Public hostname the server is reached through (repeatable), e.g. mcp.example.com",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run the MCP server over stdio (default) or HTTP."""
+    args = _parse_args(argv)
+
+    if args.transport == "http":
+        # Fail before touching Strava if the endpoint would be unprotected
+        try:
+            token = validate_token(os.environ.get("STRAVA_MCP_AUTH_TOKEN"))
+        except ValueError as e:
+            sys.exit(str(e))
+        deps.initialize()
+        run_http(mcp, args.host, args.port, token, args.allowed_hosts)
+        return
+
     deps.initialize()
     mcp.run()
 

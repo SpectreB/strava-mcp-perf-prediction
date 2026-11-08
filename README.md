@@ -99,6 +99,33 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 
 Restart Claude Desktop. The tools will appear in the tool picker.
 
+### Remote access over HTTP (personal use)
+
+By default the server runs over stdio: the client launches it as a local subprocess. To reach it from another machine or device, run it over **streamable HTTP**. This is **single-user**: the server acts for the one athlete whose Strava credentials it holds, and a bearer token keeps everyone else out. It is not a multi-user service.
+
+1. **Generate a token** and add it to `.env` (at least 24 characters; the server refuses to start in HTTP mode without one):
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   # then add to .env:  STRAVA_MCP_AUTH_TOKEN=<token>
+   ```
+2. **Start the server** on a machine that stays on:
+   ```bash
+   uv run --env-file .env strava-sport-science-mcp --transport http --port 8000
+   ```
+   It listens on `127.0.0.1:8000/mcp`. Keep the default bind address and expose it through an HTTPS tunnel (Cloudflare Tunnel, Tailscale Funnel, ngrok...) rather than opening a port. When reached through a public hostname, allow it explicitly (DNS-rebinding protection rejects unknown `Host` headers):
+   ```bash
+   ... --transport http --allowed-host mcp.example.com
+   ```
+3. **Connect a client**, for example Claude Code:
+   ```bash
+   claude mcp add --transport http strava-sport-science https://mcp.example.com/mcp \
+     --header "Authorization: Bearer <token>"
+   ```
+
+Options can also be set with `STRAVA_MCP_TRANSPORT`, `STRAVA_MCP_HOST`, `STRAVA_MCP_PORT` and `STRAVA_MCP_ALLOWED_HOSTS` (comma-separated).
+
+**Security notes:** the token grants read access to your Strava activities, so treat it like a password, always use HTTPS when the endpoint leaves your machine, and rotate it by changing `.env` and restarting. Clients that only support OAuth (rather than a static header) cannot connect to this mode.
+
 ## Tool Reference
 
 | Tool | Description | Key Inputs | Example Prompt |
