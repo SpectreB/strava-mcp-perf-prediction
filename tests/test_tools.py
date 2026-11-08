@@ -74,3 +74,23 @@ async def test_sport_science_tools_have_correct_params() -> None:
     readiness_tool = tools_by_name.get("get_race_readiness")
     assert readiness_tool is not None
     assert "target_distance_km" in readiness_tool.inputSchema["properties"]
+
+
+async def test_prompts_registered_with_arguments() -> None:
+    """Test that guided prompts are exposed with their arguments."""
+    prompts = {p.name: p for p in await mcp.list_prompts()}
+
+    assert {"race_readiness_review", "training_block_review"} <= set(prompts)
+    readiness_args = {a.name: a.required for a in prompts["race_readiness_review"].arguments or []}
+    assert readiness_args == {"target_distance_km": False, "race_date": False}
+
+
+async def test_prompt_renders_tool_plan_and_grounding_rules() -> None:
+    """Test that a rendered prompt names the tools to call and forbids invented numbers."""
+    result = await mcp.get_prompt(
+        "training_block_review", {"weeks": "6", "end_date": "2026-06-07"}
+    )
+    text = result.messages[0].content.text  # type: ignore[union-attr]
+
+    assert 'get_zone_distribution(days=42, end_date="2026-06-07")' in text
+    assert "never estimate or compute metrics yourself" in text

@@ -178,6 +178,49 @@ async def get_settings() -> str:
     return deps.config.model_dump_json(indent=2)
 
 
+# Shared rules for prompts: the LLM interprets the tools' numbers, it never computes its own
+_GROUNDING_RULES = """
+Rules:
+- Only use numbers returned by the tools; never estimate or compute metrics yourself.
+- Relay each tool's data caveats (`data_quality`, `tss_methods`) in plain words, and lower
+  your confidence when results rely on activity averages or default settings.
+- Answer in the user's language, concisely, ending with 3 concrete recommendations.
+"""
+
+
+@mcp.prompt(title="Race readiness review")
+def race_readiness_review(target_distance_km: float = 10.0, race_date: str = "") -> str:
+    """Assess whether the athlete is ready for an upcoming race and how to prepare."""
+    race = f"a {target_distance_km:g} km race"
+    if race_date:
+        race += f" on {race_date}"
+    return f"""Assess my readiness for {race}.
+
+1. Call get_race_readiness(target_distance_km={target_distance_km:g}) and explain the overall
+   score and its four components (fitness, freshness, long run, consistency).
+2. Call get_training_load(days=42) to explain my current fitness (CTL), fatigue (ATL) and
+   form (TSB), and the training phase.
+3. Call get_fitness_trend(weeks=8) to check recent volume and long-run progression.
+4. {"Given the days left before the race date, say whether to build, maintain or taper." if race_date else "Say what I should focus on before racing."}
+{_GROUNDING_RULES}"""
+
+
+@mcp.prompt(title="Training block review")
+def training_block_review(weeks: int = 8, end_date: str = "") -> str:
+    """Review a block of training: load progression, intensity balance and injury risk."""
+    period = f"the {weeks} weeks ending {end_date}" if end_date else f"my last {weeks} weeks"
+    end_arg = f', end_date="{end_date}"' if end_date else ""
+    return f"""Review my training over {period}.
+
+1. Call get_fitness_trend(weeks={weeks}{end_arg}): weekly volume, progression, and any week
+   above +10% distance (injury risk).
+2. Call get_training_load(days={weeks * 7}{end_arg}): how fitness and fatigue evolved.
+3. Call get_zone_distribution(days={weeks * 7}{end_arg}): intensity balance against the
+   80/20 rule.
+4. Summarize what went well, what to change, and whether the load was sustainable.
+{_GROUNDING_RULES}"""
+
+
 def main() -> None:
     """Run the MCP server."""
     deps.initialize()

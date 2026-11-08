@@ -114,6 +114,15 @@ Restart Claude Desktop. The tools will appear in the tool picker.
 
 All sport-science tools accept `end_date` (`YYYY-MM-DD`) to analyze a past period, e.g. "How was my form on June 7, 2026?"
 
+### Prompts
+
+Guided prompts chain several tools into one analysis. They tell the assistant which tools to call and to rely only on the returned numbers, relaying each result's data-quality caveats. In Claude Code they appear as slash commands (`/mcp__strava-sport-science__race_readiness_review`).
+
+| Prompt | Arguments | What it does |
+|---|---|---|
+| **race_readiness_review** | `target_distance_km` (default 10), `race_date` | Readiness score + form + recent progression, then build/maintain/taper advice |
+| **training_block_review** | `weeks` (default 8), `end_date` | Volume progression, load, intensity balance and injury risk over a block |
+
 ### Example Conversations
 
 **Assessing Training Balance:**
@@ -315,6 +324,7 @@ Contributions welcome! Please:
 - [x] Cycling-specific TSS model (IF with power)
 - [x] Custom zone thresholds (Strava custom HR zones, LTHR, FTP)
 - [ ] Grade-adjusted pace for hilly runs
+- [ ] More guided prompts (race-pace prediction, recovery week check, taper planning)
 - [ ] Multi-sport periodization plans
 - [ ] Peak detection and form forecasting
 - [ ] Integration with nutrition/sleep logs
